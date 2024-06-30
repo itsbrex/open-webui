@@ -46,7 +46,7 @@
 		saveHandler();
 	}}
 >
-	<div class=" space-y-3 pr-1.5 overflow-y-scroll max-h-[22rem]">
+	<div class=" space-y-3 pr-1.5 overflow-y-scroll max-h-[25rem]">
 		<div class=" ">
 			<div class=" text-sm font-medium">{$i18n.t('Query Params')}</div>
 
@@ -95,7 +95,7 @@
 					)}
 				</div>
 
-				<hr class=" dark:border-gray-700 my-3" />
+				<hr class=" dark:border-gray-850 my-3" />
 			{/if}
 
 			<div>

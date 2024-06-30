@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { v4 as uuidv4 } from 'uuid';
-
-	import { chats, config, modelfiles, settings, user } from '$lib/stores';
-	import { tick, getContext } from 'svelte';
+	import { chats, config, settings, user as _user, mobile } from '$lib/stores';
+	import { tick, getContext, onMount } from 'svelte';
 
 	import { toast } from 'svelte-sonner';
 	import { getChatList, updateChatById } from '$lib/apis/chats';
@@ -13,6 +12,8 @@
 	import Spinner from '../common/Spinner.svelte';
 	import { imageGenerations } from '$lib/apis/images';
 	import { copyToClipboard, findWordIndices } from '$lib/utils';
+	import CompareMessages from './Messages/CompareMessages.svelte';
+	import { stringify } from 'postcss';
 
 	const i18n = getContext('i18n');
 
@@ -22,16 +23,15 @@
 	export let continueGeneration: Function;
 	export let regenerateResponse: Function;
 
+	export let user = $_user;
 	export let prompt;
-	export let suggestionPrompts;
 	export let processing = '';
 	export let bottomPadding = false;
 	export let autoScroll;
-	export let selectedModels;
 	export let history = {};
 	export let messages = [];
 
-	export let selectedModelfiles = [];
+	export let selectedModels;
 
 	$: if (autoScroll && bottomPadding) {
 		(async () => {
@@ -62,7 +62,8 @@
 			childrenIds: [],
 			role: 'user',
 			content: userPrompt,
-			...(history.messages[messageId].files && { files: history.messages[messageId].files })
+			...(history.messages[messageId].files && { files: history.messages[messageId].files }),
+			models: selectedModels.filter((m, mIdx) => selectedModels.indexOf(m) === mIdx)
 		};
 
 		let messageParentId = history.messages[messageId].parentId;
@@ -78,7 +79,7 @@
 		history.currentId = userMessageId;
 
 		await tick();
-		await sendPrompt(userPrompt, userMessageId, chatId);
+		await sendPrompt(userPrompt, userMessageId);
 	};
 
 	const updateChatMessages = async () => {
@@ -201,38 +202,51 @@
 		}, 100);
 	};
 
-	const messageDeleteHandler = async (messageId) => {
+	const deleteMessageHandler = async (messageId) => {
 		const messageToDelete = history.messages[messageId];
-		const messageParentId = messageToDelete.parentId;
-		const messageChildrenIds = messageToDelete.childrenIds ?? [];
-		const hasSibling = messageChildrenIds.some(
+
+		const parentMessageId = messageToDelete.parentId;
+		const childMessageIds = messageToDelete.childrenIds ?? [];
+
+		const hasDescendantMessages = childMessageIds.some(
 			(childId) => history.messages[childId]?.childrenIds?.length > 0
 		);
-		messageChildrenIds.forEach((childId) => {
-			const child = history.messages[childId];
-			if (child && child.childrenIds) {
-				if (child.childrenIds.length === 0 && !hasSibling) {
-					// if last prompt/response pair
-					history.messages[messageParentId].childrenIds = [];
-					history.currentId = messageParentId;
+
+		history.currentId = parentMessageId;
+		await tick();
+
+		// Remove the message itself from the parent message's children array
+		history.messages[parentMessageId].childrenIds = history.messages[
+			parentMessageId
+		].childrenIds.filter((id) => id !== messageId);
+
+		await tick();
+
+		childMessageIds.forEach((childId) => {
+			const childMessage = history.messages[childId];
+
+			if (childMessage && childMessage.childrenIds) {
+				if (childMessage.childrenIds.length === 0 && !hasDescendantMessages) {
+					// If there are no other responses/prompts
+					history.messages[parentMessageId].childrenIds = [];
 				} else {
-					child.childrenIds.forEach((grandChildId) => {
+					childMessage.childrenIds.forEach((grandChildId) => {
 						if (history.messages[grandChildId]) {
-							history.messages[grandChildId].parentId = messageParentId;
-							history.messages[messageParentId].childrenIds.push(grandChildId);
+							history.messages[grandChildId].parentId = parentMessageId;
+							history.messages[parentMessageId].childrenIds.push(grandChildId);
 						}
 					});
 				}
 			}
-			// remove response
-			history.messages[messageParentId].childrenIds = history.messages[
-				messageParentId
+
+			// Remove child message id from the parent message's children array
+			history.messages[parentMessageId].childrenIds = history.messages[
+				parentMessageId
 			].childrenIds.filter((id) => id !== childId);
 		});
-		// remove prompt
-		history.messages[messageParentId].childrenIds = history.messages[
-			messageParentId
-		].childrenIds.filter((id) => id !== messageId);
+
+		await tick();
+
 		await updateChatById(localStorage.token, chatId, {
 			messages: messages,
 			history: history
@@ -240,12 +254,10 @@
 	};
 </script>
 
-<div class="h-full flex mb-16">
+<div class="h-full flex">
 	{#if messages.length == 0}
 		<Placeholder
-			models={selectedModels}
-			modelfiles={selectedModelfiles}
-			{suggestionPrompts}
+			modelIds={selectedModels}
 			submitPrompt={async (p) => {
 				let text = p;
 
@@ -285,16 +297,16 @@
 		<div class="w-full pt-2">
 			{#key chatId}
 				{#each messages as message, messageIdx}
-					<div class=" w-full {messageIdx === messages.length - 1 ? 'pb-28' : ''}">
+					<div class=" w-full {messageIdx === messages.length - 1 ? ' pb-12' : ''}">
 						<div
-							class="flex flex-col justify-between px-5 mb-3 {$settings?.fullScreenMode ?? null
+							class="flex flex-col justify-between px-5 mb-3 {$settings?.widescreenMode ?? null
 								? 'max-w-full'
 								: 'max-w-5xl'} mx-auto rounded-lg group"
 						>
 							{#if message.role === 'user'}
 								<UserMessage
-									on:delete={() => messageDeleteHandler(message.id)}
-									user={$user}
+									on:delete={() => deleteMessageHandler(message.id)}
+									{user}
 									{readOnly}
 									{message}
 									isFirstMessage={messageIdx === 0}
@@ -308,39 +320,72 @@
 									{showNextMessage}
 									copyToClipboard={copyToClipboardWithToast}
 								/>
-							{:else}
-								<ResponseMessage
-									{message}
-									modelfiles={selectedModelfiles}
-									siblings={history.messages[message.parentId]?.childrenIds ?? []}
-									isLastMessage={messageIdx + 1 === messages.length}
-									{readOnly}
-									{updateChatMessages}
-									{confirmEditResponseMessage}
-									{showPreviousMessage}
-									{showNextMessage}
-									{rateMessage}
-									copyToClipboard={copyToClipboardWithToast}
-									{continueGeneration}
-									{regenerateResponse}
-									on:save={async (e) => {
-										console.log('save', e);
+							{:else if $mobile || (history.messages[message.parentId]?.models?.length ?? 1) === 1}
+								{#key message.id && history.currentId}
+									<ResponseMessage
+										{message}
+										siblings={history.messages[message.parentId]?.childrenIds ?? []}
+										isLastMessage={messageIdx + 1 === messages.length}
+										{readOnly}
+										{updateChatMessages}
+										{confirmEditResponseMessage}
+										{showPreviousMessage}
+										{showNextMessage}
+										{rateMessage}
+										copyToClipboard={copyToClipboardWithToast}
+										{continueGeneration}
+										{regenerateResponse}
+										on:save={async (e) => {
+											console.log('save', e);
 
-										const message = e.detail;
-										history.messages[message.id] = message;
-										await updateChatById(localStorage.token, chatId, {
-											messages: messages,
-											history: history
-										});
-									}}
-								/>
+											const message = e.detail;
+											history.messages[message.id] = message;
+											await updateChatById(localStorage.token, chatId, {
+												messages: messages,
+												history: history
+											});
+										}}
+									/>
+								{/key}
+							{:else}
+								{#key message.parentId}
+									<CompareMessages
+										bind:history
+										{messages}
+										{readOnly}
+										{chatId}
+										parentMessage={history.messages[message.parentId]}
+										{messageIdx}
+										{updateChatMessages}
+										{confirmEditResponseMessage}
+										{rateMessage}
+										copyToClipboard={copyToClipboardWithToast}
+										{continueGeneration}
+										{regenerateResponse}
+										on:change={async () => {
+											await updateChatById(localStorage.token, chatId, {
+												messages: messages,
+												history: history
+											});
+
+											if (autoScroll) {
+												const element = document.getElementById('messages-container');
+												autoScroll =
+													element.scrollHeight - element.scrollTop <= element.clientHeight + 50;
+												setTimeout(() => {
+													scrollToBottom();
+												}, 100);
+											}
+										}}
+									/>
+								{/key}
 							{/if}
 						</div>
 					</div>
 				{/each}
 
 				{#if bottomPadding}
-					<div class="  pb-20" />
+					<div class="  pb-6" />
 				{/if}
 			{/key}
 		</div>
